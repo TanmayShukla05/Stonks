@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<body>
+    <h1>Market Sim</h1>
+    <div id="market"></div>
+    <script>
+        async function update() {
+            await fetch('/api/tick');
+            const data = await fetch('/api/data').then(r => r.json());
+            let html = '';
+            data.forEach((s, i) => {
+                html += `<div>Stock ${i}: $${s.p.toFixed(2)} 
+                    <button onclick="act(${i}, 'crash')">Disrupt</button>
+                    <button onclick="act(${i}, 'boost')">Enhance</button></div>`;
+            });
+            document.getElementById('market').innerHTML = html;
+        }
+        async function act(id, type) {
+            await fetch(`/api/action?id=${id}&type=${type}`, {method: 'POST'});
+        }
+        setInterval(update, 1000);
+    </script>
+</body>
+</html>
