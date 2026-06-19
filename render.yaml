@@ -1,8 +1,5 @@
 services:
   - type: web
     name: stock-simulator
-    env: cpp
-    buildCommand: |
-      wget https://raw.githubusercontent.com/yhirose/cpp-httplib/master/httplib.h
-      g++ -O3 -std=c++17 main.cpp -o server -pthread
-    startCommand: ./server
+    env: docker
+    dockerfilePath: ./Dockerfile
