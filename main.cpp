@@ -214,11 +214,9 @@ int main() {
     
     httplib::Server svr;
     
-    // Set static file mount point
     cout << "Setting up static file serving..." << endl;
     svr.set_mount_point("/", "./static");
 
-    // Health check endpoint
     svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content("OK", "text/plain");
     });
@@ -236,4 +234,65 @@ int main() {
             if (i > 0) ss << ",";
             double pred = predicted_return(i, lw.corr);
             double signal = tanh(pred / BASE_A);
-            
+            string action = (signal >= 0) ? "BUY" : "SELL";
+            double confidence = fabs(signal) * 100.0;
+            ss << "{\"p\":" << prices[i]
+               << ",\"action\":\"" << action << "\""
+               << ",\"confidence\":" << confidence
+               << ",\"shrinkage\":" << lw.shrinkage_intensity << "}";
+        }
+        ss << "]";
+        res.set_content(ss.str(), "application/json");
+    });
+
+    svr.Get("/api/correlations", [](const httplib::Request&, httplib::Response& res) {
+        auto lw = estimate_correlations();
+        double total_abs_error = 0.0;
+        int pair_count = 0;
+        stringstream ss;
+        ss << "{\"error\":[";
+        for (int i = 0; i < NUM_STOCKS; ++i) {
+            if (i > 0) ss << ",";
+            ss << "[";
+            for (int j = 0; j < NUM_STOCKS; ++j) {
+                if (j > 0) ss << ",";
+                double err = lw.corr[i][j] - true_correlations[i][j];
+                ss << err;
+                if (i != j) { total_abs_error += fabs(err); pair_count++; }
+            }
+            ss << "]";
+        }
+        ss << "],";
+        double mae = (pair_count > 0) ? total_abs_error / pair_count : 0.0;
+        ss << "\"mae\":" << mae;
+        ss << ",\"shrinkage\":" << lw.shrinkage_intensity;
+        ss << ",\"tick\":" << tick_count;
+        ss << "}";
+        res.set_content(ss.str(), "application/json");
+    });
+
+    svr.Post("/api/action", [](const httplib::Request& req, httplib::Response& res) {
+        auto id = stoi(req.get_param_value("id"));
+        auto type = req.get_param_value("type");
+        if (id >= 0 && id < NUM_STOCKS) modes[id] = type;
+        res.set_content("OK", "text/plain");
+    });
+
+    const char* port_env = getenv("PORT");
+    int port = port_env ? stoi(port_env) : 8080;
+    
+    cout << "Server starting on 0.0.0.0:" << port << endl;
+    cout << "Endpoints available:" << endl;
+    cout << "  GET  /health" << endl;
+    cout << "  GET  /api/tick" << endl;
+    cout << "  GET  /api/data" << endl;
+    cout << "  GET  /api/correlations" << endl;
+    cout << "  POST /api/action" << endl;
+    
+    if (!svr.listen("0.0.0.0", port)) {
+        cerr << "Failed to start server on port " << port << endl;
+        return 1;
+    }
+    
+    return 0;
+}
