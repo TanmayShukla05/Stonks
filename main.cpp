@@ -65,7 +65,12 @@ void tick_simulation() {
         }
         prices[i] *= (1.0 + total_shock);
 
-        returns_history[i].push_back(current_returns[i]);
+        // Store the REALIZED return (post-blend), not the pre-blend independent draw.
+        // The realized return is what actually carries the correlation signal between
+        // stocks -- using the pre-blend draw here would make every stock's history
+        // independent by construction, and the estimator could never recover the
+        // true correlations no matter how long it ran.
+        returns_history[i].push_back(total_shock);
         if ((int)returns_history[i].size() > HISTORY_LEN) returns_history[i].erase(returns_history[i].begin());
     }
 }
