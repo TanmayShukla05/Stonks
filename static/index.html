@@ -15,7 +15,9 @@
         (using Pearson correlation over a rolling 50-tick window). That estimate then feeds a
         simple factor model: each stock's predicted next move is a correlation-weighted average
         of what its (estimated) correlated peers just did, which is turned into the
-        <b>BUY/SELL confidence</b> shown under each chart.
+        <b>BUY/SELL confidence</b> shown under each chart. The "Show guessed correlations"
+        button reveals how far off the model's guesses are from the true hidden correlations,
+        as an error table (guessed &minus; true) plus a single mean absolute error number.
     </p>
     <p>
         <b>Disrupt</b> forces a stock's next move to be drawn from a strongly negative bimodal
@@ -79,8 +81,8 @@
 
             data.forEach((s, i) => {
                 document.getElementById(`price-${i}`).textContent = '$' + s.p.toFixed(2);
-                document.getElementById(`signal-${i}`).textContent =
-                    `Signal: ${s.action} (${s.confidence.toFixed(1)}% confidence)`;
+                document.getElementById(`signal-${i}`).innerHTML =
+                    `Signal: <span style="color:${s.action === 'BUY' ? 'green' : 'red'}">${s.action}</span> (${s.confidence.toFixed(1)}% confidence)`;
 
                 priceHistory[i].push(s.p);
                 if (priceHistory[i].length > HISTORY_LEN) priceHistory[i].shift();
@@ -93,8 +95,12 @@
         }
 
         async function revealCorrelations() {
-            const matrix = await fetch('/api/correlations').then(r => r.json());
-            let html = '<h3>Model-Estimated Correlations</h3><table border="1" cellpadding="4">';
+            const result = await fetch('/api/correlations').then(r => r.json());
+            const matrix = result.error;
+            let html = '<h3>Correlation Error (Guessed &minus; True)</h3>';
+            html += `<p>Mean absolute error across all pairs: ${result.mae.toFixed(3)}` +
+                    ` (0 = perfect guess, closer to 0 is better)</p>`;
+            html += '<table border="1" cellpadding="4">';
             html += '<tr><td></td>' + matrix.map((_, j) => `<td><b>${j}</b></td>`).join('') + '</tr>';
             matrix.forEach((row, i) => {
                 html += `<tr><td><b>${i}</b></td>` +
