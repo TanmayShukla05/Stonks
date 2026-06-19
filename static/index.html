@@ -1,24 +1,111 @@
 <!DOCTYPE html>
 <html>
+<head>
+<title>Market Sim</title>
+</head>
 <body>
     <h1>Market Sim</h1>
+
+    <p>
+        12 simulated stocks move every second. Each stock's return is drawn from a
+        <b>bimodal distribution</b> (two humps, not one) so it tends to jump clearly up or down
+        rather than drift quietly. Stocks are secretly correlated to each other by the server,
+        and those correlations are never sent to this page directly &mdash; instead, a small model
+        below watches the realized price history and <b>estimates</b> the correlations itself
+        (using Pearson correlation over a rolling 50-tick window). That estimate then feeds a
+        simple factor model: each stock's predicted next move is a correlation-weighted average
+        of what its (estimated) correlated peers just did, which is turned into the
+        <b>BUY/SELL confidence</b> shown under each chart.
+    </p>
+    <p>
+        <b>Disrupt</b> forces a stock's next move to be drawn from a strongly negative bimodal
+        (peaks around -4&times; to -6&times; base volatility). <b>Enhance</b> does the same on the
+        upside. Because of the hidden correlations, this can visibly move other stocks too.
+    </p>
+
     <div id="market"></div>
+
+    <button onclick="revealCorrelations()">Show guessed correlations</button>
+    <div id="corrOutput"></div>
+
     <script>
+        const NUM_STOCKS = 12;
+        const HISTORY_LEN = 60;
+        const priceHistory = Array.from({length: NUM_STOCKS}, () => []);
+
+        function ensureChartDivs() {
+            const market = document.getElementById('market');
+            if (market.children.length === NUM_STOCKS) return;
+            let html = '';
+            for (let i = 0; i < NUM_STOCKS; i++) {
+                html += `
+                    <div style="display:inline-block; margin:10px; vertical-align:top;">
+                        <div>Stock ${i}: <span id="price-${i}">--</span></div>
+                        <canvas id="chart-${i}" width="200" height="80"></canvas>
+                        <div id="signal-${i}">Signal: --</div>
+                        <button onclick="act(${i}, 'crash')">Disrupt</button>
+                        <button onclick="act(${i}, 'boost')">Enhance</button>
+                    </div>`;
+            }
+            market.innerHTML = html;
+        }
+
+        function drawChart(i) {
+            const canvas = document.getElementById(`chart-${i}`);
+            const ctx = canvas.getContext('2d');
+            const hist = priceHistory[i];
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (hist.length < 2) return;
+
+            const min = Math.min(...hist);
+            const max = Math.max(...hist);
+            const range = (max - min) || 1;
+            const stepX = canvas.width / (HISTORY_LEN - 1);
+
+            ctx.beginPath();
+            hist.forEach((p, idx) => {
+                const x = idx * stepX;
+                const y = canvas.height - ((p - min) / range) * (canvas.height - 10) - 5;
+                if (idx === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        }
+
         async function update() {
+            ensureChartDivs();
             await fetch('/api/tick');
             const data = await fetch('/api/data').then(r => r.json());
-            let html = '';
+
             data.forEach((s, i) => {
-                html += `<div>Stock ${i}: $${s.p.toFixed(2)} 
-                    <button onclick="act(${i}, 'crash')">Disrupt</button>
-                    <button onclick="act(${i}, 'boost')">Enhance</button></div>`;
+                document.getElementById(`price-${i}`).textContent = '$' + s.p.toFixed(2);
+                document.getElementById(`signal-${i}`).textContent =
+                    `Signal: ${s.action} (${s.confidence.toFixed(1)}% confidence)`;
+
+                priceHistory[i].push(s.p);
+                if (priceHistory[i].length > HISTORY_LEN) priceHistory[i].shift();
+                drawChart(i);
             });
-            document.getElementById('market').innerHTML = html;
         }
+
         async function act(id, type) {
             await fetch(`/api/action?id=${id}&type=${type}`, {method: 'POST'});
         }
+
+        async function revealCorrelations() {
+            const matrix = await fetch('/api/correlations').then(r => r.json());
+            let html = '<h3>Model-Estimated Correlations</h3><table border="1" cellpadding="4">';
+            html += '<tr><td></td>' + matrix.map((_, j) => `<td><b>${j}</b></td>`).join('') + '</tr>';
+            matrix.forEach((row, i) => {
+                html += `<tr><td><b>${i}</b></td>` +
+                    row.map(v => `<td>${v.toFixed(2)}</td>`).join('') + '</tr>';
+            });
+            html += '</table>';
+            document.getElementById('corrOutput').innerHTML = html;
+        }
+
         setInterval(update, 1000);
+        update();
     </script>
 </body>
 </html>
