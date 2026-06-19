@@ -151,18 +151,25 @@ int main() {
 
     svr.Get("/api/correlations", [](const httplib::Request&, httplib::Response& res) {
         auto est = estimate_correlations();
+        double total_abs_error = 0.0;
+        int pair_count = 0;
         stringstream ss;
-        ss << "[";
+        ss << "{\"error\":[";
         for (int i = 0; i < NUM_STOCKS; ++i) {
             if (i > 0) ss << ",";
             ss << "[";
             for (int j = 0; j < NUM_STOCKS; ++j) {
                 if (j > 0) ss << ",";
-                ss << est[i][j];
+                double err = est[i][j] - true_correlations[i][j];
+                ss << err;
+                if (i != j) { total_abs_error += fabs(err); pair_count++; }
             }
             ss << "]";
         }
-        ss << "]";
+        ss << "],";
+        double mae = (pair_count > 0) ? total_abs_error / pair_count : 0.0;
+        ss << "\"mae\":" << mae;
+        ss << "}";
         res.set_content(ss.str(), "application/json");
     });
 
