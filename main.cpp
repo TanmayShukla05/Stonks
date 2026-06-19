@@ -69,7 +69,8 @@ int main() {
         stringstream ss;
         ss << "[";
         for(int i=0; i<NUM_STOCKS; ++i) {
-            ss << "{\"p\":" << prices[i] << "},";
+            if (i > 0) ss << ",";
+            ss << "{\"p\":" << prices[i] << "}";
         }
         ss << "]";
         res.set_content(ss.str(), "application/json");
