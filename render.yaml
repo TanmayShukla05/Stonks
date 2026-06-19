@@ -3,3 +3,4 @@ services:
     name: stock-simulator
     env: docker
     dockerfilePath: ./Dockerfile
+    plan: free
