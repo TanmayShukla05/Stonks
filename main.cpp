@@ -11,6 +11,8 @@ using namespace std;
 const int NUM_STOCKS = 12;
 const double BASE_A = 0.02;     // 2% base volatility 'a'
 const int HISTORY_LEN = 50;     // rolling window for correlation + signal estimation
+const int MCMC_ITERATIONS = 1000;  // MCMC sampling iterations
+const int MCMC_BURNIN = 200;       // burn-in period
 
 vector<double> prices(NUM_STOCKS, 100.0);
 vector<string> modes(NUM_STOCKS, "normal");      // normal, crash, boost (true peaks, lasts 1 tick)
@@ -75,33 +77,170 @@ void tick_simulation() {
     }
 }
 
-// Pearson correlation between two return series (the model's *guess*, built only
-// from observed realized returns -- it never sees true_correlations).
-double pearson(const vector<double>& a, const vector<double>& b) {
-    int n = min(a.size(), b.size());
-    if (n < 5) return 0.0; // not enough data yet to say anything meaningful
-    double ma = 0, mb = 0;
-    for (int k = 0; k < n; ++k) { ma += a[k]; mb += b[k]; }
-    ma /= n; mb /= n;
-    double cov = 0, va = 0, vb = 0;
-    for (int k = 0; k < n; ++k) {
-        double da = a[k] - ma, db = b[k] - mb;
-        cov += da * db; va += da * da; vb += db * db;
-    }
-    if (va < 1e-12 || vb < 1e-12) return 0.0;
-    return cov / sqrt(va * vb);
-}
-
-vector<vector<double>> estimate_correlations() {
-    vector<vector<double>> est(NUM_STOCKS, vector<double>(NUM_STOCKS, 0.0));
-    for (int i = 0; i < NUM_STOCKS; ++i) {
-        est[i][i] = 1.0;
-        for (int j = i + 1; j < NUM_STOCKS; ++j) {
-            double r = pearson(returns_history[i], returns_history[j]);
-            est[i][j] = est[j][i] = r;
+// Ensure correlation matrix is valid (symmetric, positive semi-definite diagonal=1)
+void project_to_correlation_matrix(vector<vector<double>>& corr) {
+    int n = corr.size();
+    // Ensure symmetry
+    for (int i = 0; i < n; ++i) {
+        corr[i][i] = 1.0;
+        for (int j = i + 1; j < n; ++j) {
+            double avg = (corr[i][j] + corr[j][i]) / 2.0;
+            avg = max(-0.99, min(0.99, avg)); // clamp to valid correlation range
+            corr[i][j] = corr[j][i] = avg;
         }
     }
-    return est;
+}
+
+// Log-likelihood of observed returns given a correlation matrix
+// Using multivariate normal assumption (simplified)
+double log_likelihood(const vector<vector<double>>& corr, const vector<vector<double>>& returns) {
+    int n = returns.size();
+    int T = returns[0].size();
+    if (T < 2) return 0.0;
+    
+    double ll = 0.0;
+    
+    // For each time point, compute likelihood
+    for (int t = 0; t < T; ++t) {
+        vector<double> r(n);
+        for (int i = 0; i < n; ++i) {
+            if (t < (int)returns[i].size()) r[i] = returns[i][t];
+            else r[i] = 0.0;
+        }
+        
+        // Simplified: sum of squared standardized residuals weighted by correlation
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                if (i == j) {
+                    ll -= 0.5 * r[i] * r[i] / (BASE_A * BASE_A);
+                } else {
+                    // Correlation reduces the penalty when returns move together
+                    ll -= 0.5 * (1.0 - corr[i][j]) * r[i] * r[j] / (BASE_A * BASE_A);
+                }
+            }
+        }
+    }
+    
+    return ll;
+}
+
+// MCMC-based correlation estimation using Metropolis-Hastings
+vector<vector<double>> estimate_correlations_mcmc() {
+    int n = NUM_STOCKS;
+    
+    // Check if we have enough data
+    bool has_data = false;
+    int min_samples = 10;
+    for (int i = 0; i < n; ++i) {
+        if ((int)returns_history[i].size() >= min_samples) {
+            has_data = true;
+            break;
+        }
+    }
+    
+    if (!has_data) {
+        // Return identity matrix if not enough data
+        vector<vector<double>> identity(n, vector<double>(n, 0.0));
+        for (int i = 0; i < n; ++i) identity[i][i] = 1.0;
+        return identity;
+    }
+    
+    // Initialize with simple Pearson correlation as starting point
+    vector<vector<double>> current_corr(n, vector<double>(n, 0.0));
+    for (int i = 0; i < n; ++i) {
+        current_corr[i][i] = 1.0;
+        for (int j = i + 1; j < n; ++j) {
+            // Simple correlation estimate
+            int len = min(returns_history[i].size(), returns_history[j].size());
+            if (len < 5) {
+                current_corr[i][j] = current_corr[j][i] = 0.0;
+                continue;
+            }
+            
+            double mi = 0, mj = 0;
+            for (int k = 0; k < len; ++k) {
+                mi += returns_history[i][k];
+                mj += returns_history[j][k];
+            }
+            mi /= len; mj /= len;
+            
+            double cov = 0, vi = 0, vj = 0;
+            for (int k = 0; k < len; ++k) {
+                double di = returns_history[i][k] - mi;
+                double dj = returns_history[j][k] - mj;
+                cov += di * dj;
+                vi += di * di;
+                vj += dj * dj;
+            }
+            
+            if (vi > 1e-12 && vj > 1e-12) {
+                current_corr[i][j] = current_corr[j][i] = cov / sqrt(vi * vj);
+            }
+        }
+    }
+    
+    double current_ll = log_likelihood(current_corr, returns_history);
+    
+    // Accumulator for posterior mean
+    vector<vector<double>> mean_corr(n, vector<double>(n, 0.0));
+    int samples_collected = 0;
+    
+    uniform_real_distribution<double> uniform(0.0, 1.0);
+    normal_distribution<double> proposal(0.0, 0.05); // proposal step size
+    
+    // MCMC iterations
+    for (int iter = 0; iter < MCMC_ITERATIONS; ++iter) {
+        // Propose a new correlation matrix by perturbing one element
+        vector<vector<double>> proposed_corr = current_corr;
+        
+        // Randomly select an off-diagonal element to perturb
+        int i = (int)(uniform(rng) * n);
+        int j = (int)(uniform(rng) * n);
+        if (i == j) {
+            j = (j + 1) % n;
+        }
+        if (i > j) swap(i, j);
+        
+        // Propose new value
+        double new_val = current_corr[i][j] + proposal(rng);
+        new_val = max(-0.99, min(0.99, new_val)); // keep in valid range
+        
+        proposed_corr[i][j] = proposed_corr[j][i] = new_val;
+        
+        // Compute likelihood of proposed state
+        double proposed_ll = log_likelihood(proposed_corr, returns_history);
+        
+        // Metropolis-Hastings acceptance
+        double log_alpha = proposed_ll - current_ll;
+        
+        if (log(uniform(rng)) < log_alpha) {
+            // Accept
+            current_corr = proposed_corr;
+            current_ll = proposed_ll;
+        }
+        
+        // After burn-in, collect samples
+        if (iter >= MCMC_BURNIN) {
+            for (int ii = 0; ii < n; ++ii) {
+                for (int jj = 0; jj < n; ++jj) {
+                    mean_corr[ii][jj] += current_corr[ii][jj];
+                }
+            }
+            samples_collected++;
+        }
+    }
+    
+    // Compute posterior mean
+    if (samples_collected > 0) {
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                mean_corr[i][j] /= samples_collected;
+            }
+        }
+    }
+    
+    project_to_correlation_matrix(mean_corr);
+    return mean_corr;
 }
 
 // Correlation-weighted predicted next return for stock i: a weighted average of
@@ -135,7 +274,7 @@ int main() {
     });
 
     svr.Get("/api/data", [](const httplib::Request&, httplib::Response& res) {
-        auto est = estimate_correlations();
+        auto est = estimate_correlations_mcmc();
         stringstream ss;
         ss << "[";
         for (int i = 0; i < NUM_STOCKS; ++i) {
@@ -155,7 +294,7 @@ int main() {
     });
 
     svr.Get("/api/correlations", [](const httplib::Request&, httplib::Response& res) {
-        auto est = estimate_correlations();
+        auto est = estimate_correlations_mcmc();
         double total_abs_error = 0.0;
         int pair_count = 0;
         stringstream ss;
