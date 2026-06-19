@@ -1,111 +1,66 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Market Sim — Ledoit-Wolf + EWMA</title>
-<style>
-    body { font-family: 'Segoe UI', Arial, sans-serif; margin: 20px; background: #fafafa; }
-    h1 { color: #222; }
-    .stats-bar {
-        display: flex; gap: 30px; padding: 12px 18px;
-        background: #fff; border: 1px solid #ddd; border-radius: 8px;
-        margin-bottom: 18px; align-items: center; flex-wrap: wrap;
-    }
-    .stat-box { text-align: center; }
-    .stat-label { font-size: 0.75em; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
-    .stat-value { font-size: 1.5em; font-weight: bold; }
-    .stock-card {
-        display: inline-block; width: 220px; margin: 6px;
-        background: #fff; border: 1px solid #ddd; border-radius: 8px;
-        padding: 10px; vertical-align: top;
-    }
-    .stock-card canvas { display: block; margin: 6px auto; }
-    .stock-card button {
-        margin: 2px; padding: 4px 10px; border: none; border-radius: 4px;
-        cursor: pointer; font-size: 0.85em;
-    }
-    .btn-crash { background: #e74c3c; color: #fff; }
-    .btn-boost { background: #27ae60; color: #fff; }
-    .btn-crash:hover { background: #c0392b; }
-    .btn-boost:hover { background: #1e8449; }
-    #maeChart { background: #fff; border: 1px solid #ddd; border-radius: 6px; }
-    table.corr-table { border-collapse: collapse; font-size: 0.85em; }
-    table.corr-table td, table.corr-table th {
-        padding: 4px 7px; border: 1px solid #ccc; text-align: center;
-    }
-</style>
+<title>Market Sim (MCMC)</title>
 </head>
 <body>
-    <h1>Market Sim &mdash; Ledoit-Wolf Shrinkage + EWMA</h1>
+    <h1>Market Sim with MCMC Correlation Estimation</h1>
 
     <p>
-        12 simulated stocks move every second with <b>bimodal returns</b>.
-        Hidden correlations link the stocks, but the front-end never sees them directly.
-        A <b>Ledoit-Wolf shrinkage estimator</b> on top of an <b>Exponentially Weighted
-        Moving Average (EWMA) covariance</b> recovers the correlation structure from
-        observed returns alone. This is what real quantitative finance desks use —
-        it's faster and more accurate than MCMC for this problem because:
+        12 simulated stocks move every second. Each stock's return is drawn from a
+        <b>bimodal distribution</b> (two humps, not one) so it tends to jump clearly up or down
+        rather than drift quietly. Stocks are secretly correlated to each other by the server,
+        and those correlations are never sent to this page directly &mdash; instead, a
+        <b>Markov Chain Monte Carlo (MCMC)</b> algorithm watches the realized price history and
+        <b>estimates</b> the correlations itself using Metropolis-Hastings sampling over a rolling
+        50-tick window. That estimate then feeds a simple factor model: each stock's predicted
+        next move is a correlation-weighted average of what its (estimated) correlated peers just did,
+        which is turned into the <b>BUY/SELL confidence</b> shown under each chart. The "Show guessed
+        correlations" button reveals how far off the model's guesses are from the true hidden
+        correlations, as an error table (guessed &minus; true) plus a single mean absolute error number.
     </p>
-    <ul>
-        <li><b>EWMA</b> adapts to regime changes (crash/boost) within a few ticks instead
-            of needing a full window to flush old data</li>
-        <li><b>Shrinkage</b> regularises the noisy sample covariance toward a stable target
-            (scaled identity), dramatically cutting estimation error when the number of
-            observations isn't much larger than the number of stocks</li>
-        <li>The shrinkage intensity is computed <b>analytically</b> — no sampling, no
-            convergence issues, O(p²·T) per tick</li>
-    </ul>
-
-    <div class="stats-bar">
-        <div class="stat-box">
-            <div class="stat-label">Current MAE</div>
-            <div class="stat-value" id="currentMAE" style="color:#2980b9;">—</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">Shrinkage Intensity</div>
-            <div class="stat-value" id="shrinkageVal" style="color:#8e44ad;">—</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">Tick</div>
-            <div class="stat-value" id="tickVal" style="color:#555;">0</div>
-        </div>
-        <div class="stat-box">
-            <div class="stat-label">Min MAE</div>
-            <div class="stat-value" id="minMAE" style="color:#27ae60;">—</div>
-        </div>
-    </div>
+    <p>
+        <b>Disrupt</b> forces a stock's next move to be drawn from a strongly negative bimodal
+        (peaks around -4&times; to -6&times; base volatility). <b>Enhance</b> does the same on the
+        upside. Because of the hidden correlations, this can visibly move other stocks too.
+        The dot next to each price is <span style="color:green">green</span> if the price is higher
+        than it was 30 ticks ago, <span style="color:red">red</span> if lower, and black if unchanged
+        or not enough history yet.
+    </p>
 
     <div id="market"></div>
 
     <h3>Mean Absolute Correlation Error (over time)</h3>
-    <canvas id="maeChart" width="800" height="140"></canvas>
+    <div><b>Current MAE: <span id="currentMAE" style="font-size:1.2em; color:blue;">--</span></b></div>
+    <canvas id="maeChart" width="800" height="120"></canvas>
 
-    <br><br>
-    <button onclick="revealCorrelations()" style="padding:8px 16px;font-size:1em;cursor:pointer;">
-        Show guessed correlations
-    </button>
+    <button onclick="revealCorrelations()">Show guessed correlations</button>
     <div id="corrOutput"></div>
 
     <script>
         const NUM_STOCKS = 12;
         const HISTORY_LEN = 60;
         const priceHistory = Array.from({length: NUM_STOCKS}, () => []);
-        let globalMinMAE = Infinity;
 
         function ensureChartDivs() {
             const market = document.getElementById('market');
             if (market.children.length > 0) return;
-            let html = '';
+            const COLS = 4;
+            let html = '<table border="0" cellpadding="10"><tbody>';
             for (let i = 0; i < NUM_STOCKS; i++) {
+                if (i % COLS === 0) html += '<tr>';
                 html += `
-                <div class="stock-card">
-                    <div><b>Stock ${i}</b>: <span id="price-${i}">--</span>
-                        <span id="dot-${i}" style="font-size:1.2em;">&#9679;</span></div>
-                    <canvas id="chart-${i}" width="200" height="70"></canvas>
-                    <div id="signal-${i}" style="font-size:0.9em;">Signal: --</div>
-                    <button class="btn-crash" onclick="act(${i}, 'crash')">Disrupt</button>
-                    <button class="btn-boost" onclick="act(${i}, 'boost')">Enhance</button>
-                </div>`;
+                    <td>
+                        <div>Stock ${i}: <span id="price-${i}">--</span>
+                            <span id="dot-${i}">&#9679;</span></div>
+                        <canvas id="chart-${i}" width="200" height="80"></canvas>
+                        <div id="signal-${i}">Signal: --</div>
+                        <button onclick="act(${i}, 'crash')">Disrupt</button>
+                        <button onclick="act(${i}, 'boost')">Enhance</button>
+                    </td>`;
+                if (i % COLS === COLS - 1) html += '</tr>';
             }
+            html += '</tbody></table>';
             market.innerHTML = html;
         }
 
@@ -121,11 +76,6 @@
             const range = (max - min) || 1;
             const stepX = canvas.width / (HISTORY_LEN - 1);
 
-            // Gradient fill
-            const last = hist[hist.length - 1], first = hist[0];
-            const color = last >= first ? 'rgba(39,174,96,0.15)' : 'rgba(231,76,60,0.15)';
-            const lineColor = last >= first ? '#27ae60' : '#e74c3c';
-
             ctx.beginPath();
             hist.forEach((p, idx) => {
                 const x = idx * stepX;
@@ -133,21 +83,11 @@
                 if (idx === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);
             });
-            ctx.strokeStyle = lineColor;
-            ctx.lineWidth = 1.5;
             ctx.stroke();
-
-            // Fill under
-            const lastX = (hist.length - 1) * stepX;
-            ctx.lineTo(lastX, canvas.height);
-            ctx.lineTo(0, canvas.height);
-            ctx.closePath();
-            ctx.fillStyle = color;
-            ctx.fill();
         }
 
         const maeHistory = [];
-        const MAE_HISTORY_LEN = 120;
+        const MAE_HISTORY_LEN = 60;
 
         function updateDot(i) {
             const hist = priceHistory[i];
@@ -165,11 +105,7 @@
             maeHistory.push(mae);
             if (maeHistory.length > MAE_HISTORY_LEN) maeHistory.shift();
 
-            if (mae < globalMinMAE) globalMinMAE = mae;
-
-            // Update stats
             document.getElementById('currentMAE').textContent = mae.toFixed(4);
-            document.getElementById('minMAE').textContent = globalMinMAE.toFixed(4);
 
             const canvas = document.getElementById('maeChart');
             const ctx = canvas.getContext('2d');
@@ -178,37 +114,24 @@
 
             const min = Math.min(...maeHistory);
             const max = Math.max(...maeHistory);
-            const range = (max - min) || 0.001;
+            const range = (max - min) || 1;
             const stepX = canvas.width / (MAE_HISTORY_LEN - 1);
-            const padTop = 20, padBot = 20;
-            const plotH = canvas.height - padTop - padBot;
 
-            // Grid lines
-            ctx.strokeStyle = '#eee';
-            ctx.lineWidth = 1;
-            for (let g = 0; g <= 4; g++) {
-                const y = padTop + (plotH * g / 4);
-                ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-            }
-
-            // MAE line
             ctx.beginPath();
             maeHistory.forEach((v, idx) => {
                 const x = idx * stepX;
-                const y = padTop + plotH - ((v - min) / range) * plotH;
+                const y = canvas.height - ((v - min) / range) * (canvas.height - 10) - 5;
                 if (idx === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);
             });
-            ctx.strokeStyle = '#2980b9';
+            ctx.strokeStyle = 'blue';
             ctx.lineWidth = 2;
             ctx.stroke();
 
-            // Labels
-            ctx.fillStyle = '#888';
-            ctx.font = '11px sans-serif';
-            ctx.fillText(`Max: ${max.toFixed(4)}`, 5, padTop - 4);
-            ctx.fillText(`Min: ${min.toFixed(4)}`, 5, canvas.height - 4);
-            ctx.fillText(`Current: ${mae.toFixed(4)}`, canvas.width - 130, padTop - 4);
+            ctx.fillStyle = 'black';
+            ctx.font = '10px sans-serif';
+            ctx.fillText(`Min: ${min.toFixed(3)}`, 5, canvas.height - 5);
+            ctx.fillText(`Max: ${max.toFixed(3)}`, 5, 10);
         }
 
         async function update() {
@@ -219,20 +142,16 @@
             data.forEach((s, i) => {
                 document.getElementById(`price-${i}`).textContent = '$' + s.p.toFixed(2);
                 document.getElementById(`signal-${i}`).innerHTML =
-                    `Signal: <span style="color:${s.action === 'BUY' ? '#27ae60' : '#e74c3c'};font-weight:bold;">${s.action}</span> (${s.confidence.toFixed(1)}%)`;
+                    `Signal: <span style="color:${s.action === 'BUY' ? 'green' : 'red'}">${s.action}</span> (${s.confidence.toFixed(1)}% confidence)`;
+
                 priceHistory[i].push(s.p);
                 if (priceHistory[i].length > HISTORY_LEN) priceHistory[i].shift();
                 drawChart(i);
                 updateDot(i);
             });
 
-            if (data.length > 0 && data[0].shrinkage !== undefined) {
-                document.getElementById('shrinkageVal').textContent = data[0].shrinkage.toFixed(3);
-            }
-
             const corr = await fetch('/api/correlations').then(r => r.json());
             drawMaeChart(corr.mae);
-            document.getElementById('tickVal').textContent = corr.tick || '?';
         }
 
         async function act(id, type) {
@@ -242,19 +161,24 @@
         async function revealCorrelations() {
             const result = await fetch('/api/correlations').then(r => r.json());
             const matrix = result.error;
-            let html = '<h3>Correlation Error (Guessed &minus; True)</h3>';
-            html += `<p><b>MAE: ${result.mae.toFixed(4)}</b> &nbsp;|&nbsp; `;
-            html += `Shrinkage intensity: ${(result.shrinkage || 0).toFixed(3)} &nbsp;|&nbsp; `;
-            html += `Tick: ${result.tick}</p>`;
-            html += '<table class="corr-table">';
-            html += '<tr><th></th>' + matrix.map((_, j) => `<th>${j}</th>`).join('') + '</tr>';
+            let html = '<h3>Correlation Error (Guessed &minus; True) via MCMC</h3>';
+            html += `<p><b>Mean absolute error across all pairs: ${result.mae.toFixed(4)}</b>` +
+                    ` (0 = perfect guess, closer to 0 is better)</p>`;
+            html += '<table border="1" cellpadding="4">';
+            html += '<tr><td></td>' + matrix.map((_, j) => `<td><b>${j}</b></td>`).join('') + '</tr>';
             matrix.forEach((row, i) => {
-                html += `<tr><th>${i}</th>` +
-                    row.map((v, j) => {
-                        if (i === j) return '<td style="background:#f0f0f0;">—</td>';
-                        const abs = Math.abs(v);
-                        const bg = abs < 0.05 ? '#d5f5e3' : abs < 0.15 ? '#fdebd0' : '#fadbd8';
-                        return `<td style="background:${bg}">${v.toFixed(3)}</td>`;
+                html += `<tr><td><b>${i}</b></td>` +
+                    row.map(v => {
+                        const color = Math.abs(v) < 0.1 ? 'green' : (Math.abs(v) < 0.2 ? 'orange' : 'red');
+                        return `<td style="color:${color}">${v.toFixed(3)}</td>`;
                     }).join('') + '</tr>';
             });
-            html += 
+            html += '</table>';
+            document.getElementById('corrOutput').innerHTML = html;
+        }
+
+        setInterval(update, 1000);
+        update();
+    </script>
+</body>
+</html>
