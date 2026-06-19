@@ -7,20 +7,20 @@
 #include <sstream>
 #include <algorithm>
 #include <numeric>
+#include <cstdlib>
 using namespace std;
 
 // ===================== CONFIG =====================
 const int NUM_STOCKS = 12;
 const double BASE_A = 0.02;
 const int HISTORY_LEN = 50;
-const double EWMA_LAMBDA = 0.94;  // decay factor: higher = longer memory, 0.94 is RiskMetrics standard
+const double EWMA_LAMBDA = 0.94;
 
 vector<double> prices(NUM_STOCKS, 100.0);
 vector<string> modes(NUM_STOCKS, "normal");
 vector<vector<double>> true_correlations(NUM_STOCKS, vector<double>(NUM_STOCKS, 0.0));
 vector<vector<double>> returns_history;
 
-// EWMA covariance matrix, updated incrementally each tick
 vector<vector<double>> ewma_cov(NUM_STOCKS, vector<double>(NUM_STOCKS, 0.0));
 vector<double> ewma_mean(NUM_STOCKS, 0.0);
 bool ewma_initialized = false;
@@ -29,6 +29,7 @@ int tick_count = 0;
 mt19937 rng(1337);
 
 void init_data() {
+    cout << "Initializing data..." << endl;
     uniform_real_distribution<double> corr_dist(0.0, 0.5);
     for (int i = 0; i < NUM_STOCKS; ++i) {
         true_correlations[i][i] = 1.0;
@@ -38,10 +39,10 @@ void init_data() {
         }
         returns_history.push_back(vector<double>());
     }
-    // Initialize EWMA covariance to identity scaled by BASE_A^2
     for (int i = 0; i < NUM_STOCKS; ++i) {
         ewma_cov[i][i] = BASE_A * BASE_A;
     }
+    cout << "Data initialized successfully" << endl;
 }
 
 double get_bimodal_return(const string& mode) {
@@ -56,30 +57,25 @@ double get_bimodal_return(const string& mode) {
     return dist(rng);
 }
 
-// Update EWMA covariance with a new observation vector
 void update_ewma(const vector<double>& new_returns) {
     double lam = EWMA_LAMBDA;
 
     if (!ewma_initialized) {
-        // First observation: initialize mean, covariance stays at prior
         for (int i = 0; i < NUM_STOCKS; ++i) ewma_mean[i] = new_returns[i];
         ewma_initialized = true;
         return;
     }
 
-    // Update exponentially weighted mean
     vector<double> old_mean = ewma_mean;
     for (int i = 0; i < NUM_STOCKS; ++i) {
         ewma_mean[i] = lam * ewma_mean[i] + (1.0 - lam) * new_returns[i];
     }
 
-    // Compute de-meaned returns (using old mean for unbiased update)
     vector<double> dev(NUM_STOCKS);
     for (int i = 0; i < NUM_STOCKS; ++i) {
         dev[i] = new_returns[i] - old_mean[i];
     }
 
-    // Update covariance: C_t = lambda * C_{t-1} + (1-lambda) * dev * dev^T
     for (int i = 0; i < NUM_STOCKS; ++i) {
         for (int j = i; j < NUM_STOCKS; ++j) {
             ewma_cov[i][j] = lam * ewma_cov[i][j] + (1.0 - lam) * dev[i] * dev[j];
@@ -110,19 +106,13 @@ void tick_simulation() {
             returns_history[i].erase(returns_history[i].begin());
     }
 
-    // Incrementally update EWMA covariance
     update_ewma(realized_returns);
     tick_count++;
 }
 
-// ===================== LEDOIT-WOLF SHRINKAGE =====================
-// Shrinks the sample (or EWMA) covariance toward a structured target.
-// Target F = scaled identity (average variance on diagonal, zero off-diagonal).
-// The optimal shrinkage intensity is computed analytically (Ledoit & Wolf, 2004).
-
 struct LWResult {
-    vector<vector<double>> cov;   // shrunk covariance
-    vector<vector<double>> corr;  // derived correlation
+    vector<vector<double>> cov;
+    vector<vector<double>> corr;
     double shrinkage_intensity;
 };
 
@@ -132,13 +122,10 @@ LWResult ledoit_wolf_shrink(const vector<vector<double>>& sample_cov, int T) {
     result.cov.assign(p, vector<double>(p, 0.0));
     result.corr.assign(p, vector<double>(p, 0.0));
 
-    // Target: scaled identity with mu = average eigenvalue = trace(S)/p
     double mu = 0.0;
     for (int i = 0; i < p; ++i) mu += sample_cov[i][i];
     mu /= p;
 
-    // Target matrix F = mu * I
-    // delta = ||S - F||^2 / p^2  (squared Frobenius distance, normalized)
     double delta = 0.0;
     for (int i = 0; i < p; ++i) {
         for (int j = 0; j < p; ++j) {
@@ -148,16 +135,11 @@ LWResult ledoit_wolf_shrink(const vector<vector<double>>& sample_cov, int T) {
     }
     delta /= (double)(p * p);
 
-    // For the EWMA case, effective sample size is approximately 1/(1-lambda)
-    // but we use the actual observation count, clamped
     int n_eff = max(T, 2);
 
-    // Simplified Ledoit-Wolf shrinkage intensity using the returns history
-    // to estimate the variance of sample covariance entries
     double beta = 0.0;
     if (!returns_history[0].empty()) {
         int n = (int)returns_history[0].size();
-        // Compute means
         vector<double> means(p, 0.0);
         for (int i = 0; i < p; ++i) {
             for (int t = 0; t < n; ++t) {
@@ -166,8 +148,6 @@ LWResult ledoit_wolf_shrink(const vector<vector<double>>& sample_cov, int T) {
             means[i] /= n;
         }
 
-        // beta = (1/n^2) * sum_t ||z_t z_t^T - S||^2 / p^2
-        // where z_t = x_t - mean
         double sum_sq = 0.0;
         for (int t = 0; t < n; ++t) {
             vector<double> z(p);
@@ -184,12 +164,10 @@ LWResult ledoit_wolf_shrink(const vector<vector<double>>& sample_cov, int T) {
         beta = sum_sq / (n * n * p * p);
     }
 
-    // Optimal shrinkage intensity, clamped to [0,1]
     double intensity = (delta > 1e-15) ? min(beta / delta, 1.0) : 0.0;
     intensity = max(0.0, intensity);
     result.shrinkage_intensity = intensity;
 
-    // Shrunk covariance: S* = intensity * F + (1 - intensity) * S
     for (int i = 0; i < p; ++i) {
         for (int j = 0; j < p; ++j) {
             double target_val = (i == j) ? mu : 0.0;
@@ -197,7 +175,6 @@ LWResult ledoit_wolf_shrink(const vector<vector<double>>& sample_cov, int T) {
         }
     }
 
-    // Derive correlation matrix from shrunk covariance
     for (int i = 0; i < p; ++i) {
         result.corr[i][i] = 1.0;
         double si = sqrt(max(result.cov[i][i], 1e-15));
@@ -212,7 +189,6 @@ LWResult ledoit_wolf_shrink(const vector<vector<double>>& sample_cov, int T) {
     return result;
 }
 
-// Main estimation pipeline: EWMA covariance -> Ledoit-Wolf shrinkage -> correlation
 LWResult estimate_correlations() {
     return ledoit_wolf_shrink(ewma_cov, tick_count);
 }
@@ -233,9 +209,19 @@ double predicted_return(int i, const vector<vector<double>>& est) {
 }
 
 int main() {
+    cout << "Starting Market Simulator..." << endl;
     init_data();
+    
     httplib::Server svr;
+    
+    // Set static file mount point
+    cout << "Setting up static file serving..." << endl;
     svr.set_mount_point("/", "./static");
+
+    // Health check endpoint
+    svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content("OK", "text/plain");
+    });
 
     svr.Get("/api/tick", [](const httplib::Request&, httplib::Response& res) {
         tick_simulation();
@@ -250,51 +236,4 @@ int main() {
             if (i > 0) ss << ",";
             double pred = predicted_return(i, lw.corr);
             double signal = tanh(pred / BASE_A);
-            string action = (signal >= 0) ? "BUY" : "SELL";
-            double confidence = fabs(signal) * 100.0;
-            ss << "{\"p\":" << prices[i]
-               << ",\"action\":\"" << action << "\""
-               << ",\"confidence\":" << confidence
-               << ",\"shrinkage\":" << lw.shrinkage_intensity << "}";
-        }
-        ss << "]";
-        res.set_content(ss.str(), "application/json");
-    });
-
-    svr.Get("/api/correlations", [](const httplib::Request&, httplib::Response& res) {
-        auto lw = estimate_correlations();
-        double total_abs_error = 0.0;
-        int pair_count = 0;
-        stringstream ss;
-        ss << "{\"error\":[";
-        for (int i = 0; i < NUM_STOCKS; ++i) {
-            if (i > 0) ss << ",";
-            ss << "[";
-            for (int j = 0; j < NUM_STOCKS; ++j) {
-                if (j > 0) ss << ",";
-                double err = lw.corr[i][j] - true_correlations[i][j];
-                ss << err;
-                if (i != j) { total_abs_error += fabs(err); pair_count++; }
-            }
-            ss << "]";
-        }
-        ss << "],";
-        double mae = (pair_count > 0) ? total_abs_error / pair_count : 0.0;
-        ss << "\"mae\":" << mae;
-        ss << ",\"shrinkage\":" << lw.shrinkage_intensity;
-        ss << ",\"tick\":" << tick_count;
-        ss << "}";
-        res.set_content(ss.str(), "application/json");
-    });
-
-    svr.Post("/api/action", [](const httplib::Request& req, httplib::Response& res) {
-        auto id = stoi(req.get_param_value("id"));
-        auto type = req.get_param_value("type");
-        if (id >= 0 && id < NUM_STOCKS) modes[id] = type;
-        res.set_content("OK", "text/plain");
-    });
-
-    cout << "Server starting on port "
-         << (getenv("PORT") ? getenv("PORT") : "8080") << endl;
-    svr.listen("0.0.0.0", stoi(getenv("PORT") ? getenv("PORT") : "8080"));
-}
+            
