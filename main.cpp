@@ -1,3 +1,4 @@
+#define CPPHTTPLIB_OPENSSL_SUPPORT 0
 #include "httplib.h"
 #include <iostream>
 #include <vector>
