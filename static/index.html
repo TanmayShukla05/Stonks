@@ -23,9 +23,15 @@
         <b>Disrupt</b> forces a stock's next move to be drawn from a strongly negative bimodal
         (peaks around -4&times; to -6&times; base volatility). <b>Enhance</b> does the same on the
         upside. Because of the hidden correlations, this can visibly move other stocks too.
+        The dot next to each price is <span style="color:green">green</span> if the price is higher
+        than it was 30 ticks ago, <span style="color:red">red</span> if lower, and black if unchanged
+        or not enough history yet.
     </p>
 
     <div id="market"></div>
+
+    <h3>Mean Absolute Correlation Error (over time)</h3>
+    <canvas id="maeChart" width="800" height="120"></canvas>
 
     <button onclick="revealCorrelations()">Show guessed correlations</button>
     <div id="corrOutput"></div>
@@ -37,18 +43,23 @@
 
         function ensureChartDivs() {
             const market = document.getElementById('market');
-            if (market.children.length === NUM_STOCKS) return;
-            let html = '';
+            if (market.children.length > 0) return;
+            const COLS = 4;
+            let html = '<table border="0" cellpadding="10"><tbody>';
             for (let i = 0; i < NUM_STOCKS; i++) {
+                if (i % COLS === 0) html += '<tr>';
                 html += `
-                    <div style="display:inline-block; margin:10px; vertical-align:top;">
-                        <div>Stock ${i}: <span id="price-${i}">--</span></div>
+                    <td>
+                        <div>Stock ${i}: <span id="price-${i}">--</span>
+                            <span id="dot-${i}">&#9679;</span></div>
                         <canvas id="chart-${i}" width="200" height="80"></canvas>
                         <div id="signal-${i}">Signal: --</div>
                         <button onclick="act(${i}, 'crash')">Disrupt</button>
                         <button onclick="act(${i}, 'boost')">Enhance</button>
-                    </div>`;
+                    </td>`;
+                if (i % COLS === COLS - 1) html += '</tr>';
             }
+            html += '</tbody></table>';
             market.innerHTML = html;
         }
 
@@ -74,6 +85,45 @@
             ctx.stroke();
         }
 
+        const maeHistory = [];
+        const MAE_HISTORY_LEN = 60;
+
+        function updateDot(i) {
+            const hist = priceHistory[i];
+            const dot = document.getElementById(`dot-${i}`);
+            const lookback = 30;
+            if (hist.length <= lookback) { dot.style.color = 'black'; return; }
+            const current = hist[hist.length - 1];
+            const past = hist[hist.length - 1 - lookback];
+            if (current > past) dot.style.color = 'green';
+            else if (current < past) dot.style.color = 'red';
+            else dot.style.color = 'black';
+        }
+
+        function drawMaeChart(mae) {
+            maeHistory.push(mae);
+            if (maeHistory.length > MAE_HISTORY_LEN) maeHistory.shift();
+
+            const canvas = document.getElementById('maeChart');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (maeHistory.length < 2) return;
+
+            const min = Math.min(...maeHistory);
+            const max = Math.max(...maeHistory);
+            const range = (max - min) || 1;
+            const stepX = canvas.width / (MAE_HISTORY_LEN - 1);
+
+            ctx.beginPath();
+            maeHistory.forEach((v, idx) => {
+                const x = idx * stepX;
+                const y = canvas.height - ((v - min) / range) * (canvas.height - 10) - 5;
+                if (idx === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        }
+
         async function update() {
             ensureChartDivs();
             await fetch('/api/tick');
@@ -87,7 +137,11 @@
                 priceHistory[i].push(s.p);
                 if (priceHistory[i].length > HISTORY_LEN) priceHistory[i].shift();
                 drawChart(i);
+                updateDot(i);
             });
+
+            const corr = await fetch('/api/correlations').then(r => r.json());
+            drawMaeChart(corr.mae);
         }
 
         async function act(id, type) {
