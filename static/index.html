@@ -1,23 +1,23 @@
 <!DOCTYPE html>
 <html>
 <head>
-<title>Market Sim</title>
+<title>Market Sim (MCMC)</title>
 </head>
 <body>
-    <h1>Market Sim</h1>
+    <h1>Market Sim with MCMC Correlation Estimation</h1>
 
     <p>
         12 simulated stocks move every second. Each stock's return is drawn from a
         <b>bimodal distribution</b> (two humps, not one) so it tends to jump clearly up or down
         rather than drift quietly. Stocks are secretly correlated to each other by the server,
-        and those correlations are never sent to this page directly &mdash; instead, a small model
-        below watches the realized price history and <b>estimates</b> the correlations itself
-        (using Pearson correlation over a rolling 50-tick window). That estimate then feeds a
-        simple factor model: each stock's predicted next move is a correlation-weighted average
-        of what its (estimated) correlated peers just did, which is turned into the
-        <b>BUY/SELL confidence</b> shown under each chart. The "Show guessed correlations"
-        button reveals how far off the model's guesses are from the true hidden correlations,
-        as an error table (guessed &minus; true) plus a single mean absolute error number.
+        and those correlations are never sent to this page directly &mdash; instead, a 
+        <b>Markov Chain Monte Carlo (MCMC)</b> algorithm watches the realized price history and 
+        <b>estimates</b> the correlations itself using Metropolis-Hastings sampling over a rolling 
+        50-tick window. That estimate then feeds a simple factor model: each stock's predicted 
+        next move is a correlation-weighted average of what its (estimated) correlated peers just did, 
+        which is turned into the <b>BUY/SELL confidence</b> shown under each chart. The "Show guessed 
+        correlations" button reveals how far off the model's guesses are from the true hidden 
+        correlations, as an error table (guessed &minus; true) plus a single mean absolute error number.
     </p>
     <p>
         <b>Disrupt</b> forces a stock's next move to be drawn from a strongly negative bimodal
@@ -31,6 +31,7 @@
     <div id="market"></div>
 
     <h3>Mean Absolute Correlation Error (over time)</h3>
+    <div><b>Current MAE: <span id="currentMAE" style="font-size:1.2em; color:blue;">--</span></b></div>
     <canvas id="maeChart" width="800" height="120"></canvas>
 
     <button onclick="revealCorrelations()">Show guessed correlations</button>
@@ -104,6 +105,9 @@
             maeHistory.push(mae);
             if (maeHistory.length > MAE_HISTORY_LEN) maeHistory.shift();
 
+            // Update numerical display
+            document.getElementById('currentMAE').textContent = mae.toFixed(4);
+
             const canvas = document.getElementById('maeChart');
             const ctx = canvas.getContext('2d');
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -121,7 +125,15 @@
                 if (idx === 0) ctx.moveTo(x, y);
                 else ctx.lineTo(x, y);
             });
+            ctx.strokeStyle = 'blue';
+            ctx.lineWidth = 2;
             ctx.stroke();
+
+            // Draw axis labels
+            ctx.fillStyle = 'black';
+            ctx.font = '10px sans-serif';
+            ctx.fillText(`Min: ${min.toFixed(3)}`, 5, canvas.height - 5);
+            ctx.fillText(`Max: ${max.toFixed(3)}`, 5, 10);
         }
 
         async function update() {
@@ -151,14 +163,17 @@
         async function revealCorrelations() {
             const result = await fetch('/api/correlations').then(r => r.json());
             const matrix = result.error;
-            let html = '<h3>Correlation Error (Guessed &minus; True)</h3>';
-            html += `<p>Mean absolute error across all pairs: ${result.mae.toFixed(3)}` +
+            let html = '<h3>Correlation Error (Guessed &minus; True) via MCMC</h3>';
+            html += `<p><b>Mean absolute error across all pairs: ${result.mae.toFixed(4)}</b>` +
                     ` (0 = perfect guess, closer to 0 is better)</p>`;
             html += '<table border="1" cellpadding="4">';
             html += '<tr><td></td>' + matrix.map((_, j) => `<td><b>${j}</b></td>`).join('') + '</tr>';
             matrix.forEach((row, i) => {
                 html += `<tr><td><b>${i}</b></td>` +
-                    row.map(v => `<td>${v.toFixed(2)}</td>`).join('') + '</tr>';
+                    row.map(v => {
+                        const color = Math.abs(v) < 0.1 ? 'green' : (Math.abs(v) < 0.2 ? 'orange' : 'red');
+                        return `<td style="color:${color}">${v.toFixed(3)}</td>`;
+                    }).join('') + '</tr>';
             });
             html += '</table>';
             document.getElementById('corrOutput').innerHTML = html;
