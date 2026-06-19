@@ -11,8 +11,8 @@ RUN wget https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.14.3/httplib.h
 COPY main.cpp .
 COPY static ./static
 
-# Compile with verbose output to catch errors
-RUN g++ main.cpp -O2 -std=c++17 -o app -pthread -DCPPHTTPLIB_OPENSSL_SUPPORT=0 || \
+# Compile (the CPPHTTPLIB_OPENSSL_SUPPORT is now defined in main.cpp)
+RUN g++ main.cpp -O2 -std=c++17 -o app -pthread || \
     (echo "Compilation failed!" && exit 1)
 
 # Verify the binary exists
