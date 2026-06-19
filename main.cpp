@@ -1,4 +1,3 @@
-#define CPPHTTPLIB_OPENSSL_SUPPORT 0
 #include "httplib.h"
 #include <iostream>
 #include <vector>
@@ -7,30 +6,25 @@
 #include <string>
 #include <sstream>
 #include <algorithm>
-#include <numeric>
 #include <cstdlib>
+
 using namespace std;
 
 // ===================== CONFIG =====================
 const int NUM_STOCKS = 12;
 const double BASE_A = 0.02;
 const int HISTORY_LEN = 50;
-const double EWMA_LAMBDA = 0.94;
+const int MCMC_ITERATIONS = 1000;
+const int MCMC_BURNIN = 200;
 
 vector<double> prices(NUM_STOCKS, 100.0);
 vector<string> modes(NUM_STOCKS, "normal");
 vector<vector<double>> true_correlations(NUM_STOCKS, vector<double>(NUM_STOCKS, 0.0));
 vector<vector<double>> returns_history;
 
-vector<vector<double>> ewma_cov(NUM_STOCKS, vector<double>(NUM_STOCKS, 0.0));
-vector<double> ewma_mean(NUM_STOCKS, 0.0);
-bool ewma_initialized = false;
-int tick_count = 0;
-
 mt19937 rng(1337);
 
 void init_data() {
-    cout << "Initializing data..." << endl;
     uniform_real_distribution<double> corr_dist(0.0, 0.5);
     for (int i = 0; i < NUM_STOCKS; ++i) {
         true_correlations[i][i] = 1.0;
@@ -40,49 +34,25 @@ void init_data() {
         }
         returns_history.push_back(vector<double>());
     }
-    for (int i = 0; i < NUM_STOCKS; ++i) {
-        ewma_cov[i][i] = BASE_A * BASE_A;
-    }
-    cout << "Data initialized successfully" << endl;
 }
 
 double get_bimodal_return(const string& mode) {
     double peakLow, peakHigh;
-    if (mode == "crash") { peakLow = -6 * BASE_A; peakHigh = -4 * BASE_A; }
-    else if (mode == "boost") { peakLow = 4 * BASE_A; peakHigh = 6 * BASE_A; }
-    else { peakLow = -BASE_A; peakHigh = BASE_A; }
+    if (mode == "crash") {
+        peakLow = -6 * BASE_A;
+        peakHigh = -4 * BASE_A;
+    } else if (mode == "boost") {
+        peakLow = 4 * BASE_A;
+        peakHigh = 6 * BASE_A;
+    } else {
+        peakLow = -BASE_A;
+        peakHigh = BASE_A;
+    }
 
     uniform_real_distribution<double> coin(0.0, 1.0);
     double peak = (coin(rng) < 0.5) ? peakLow : peakHigh;
     normal_distribution<double> dist(peak, BASE_A * 0.25);
     return dist(rng);
-}
-
-void update_ewma(const vector<double>& new_returns) {
-    double lam = EWMA_LAMBDA;
-
-    if (!ewma_initialized) {
-        for (int i = 0; i < NUM_STOCKS; ++i) ewma_mean[i] = new_returns[i];
-        ewma_initialized = true;
-        return;
-    }
-
-    vector<double> old_mean = ewma_mean;
-    for (int i = 0; i < NUM_STOCKS; ++i) {
-        ewma_mean[i] = lam * ewma_mean[i] + (1.0 - lam) * new_returns[i];
-    }
-
-    vector<double> dev(NUM_STOCKS);
-    for (int i = 0; i < NUM_STOCKS; ++i) {
-        dev[i] = new_returns[i] - old_mean[i];
-    }
-
-    for (int i = 0; i < NUM_STOCKS; ++i) {
-        for (int j = i; j < NUM_STOCKS; ++j) {
-            ewma_cov[i][j] = lam * ewma_cov[i][j] + (1.0 - lam) * dev[i] * dev[j];
-            ewma_cov[j][i] = ewma_cov[i][j];
-        }
-    }
 }
 
 void tick_simulation() {
@@ -92,110 +62,128 @@ void tick_simulation() {
         if (modes[i] != "normal") modes[i] = "normal";
     }
 
-    vector<double> realized_returns(NUM_STOCKS);
     for (int i = 0; i < NUM_STOCKS; ++i) {
         double total_shock = 0.0;
         for (int j = 0; j < NUM_STOCKS; ++j) {
             double weight = (i == j) ? 1.0 : true_correlations[i][j] * 0.2;
             total_shock += current_returns[j] * weight;
         }
+
         prices[i] *= (1.0 + total_shock);
-        realized_returns[i] = total_shock;
 
         returns_history[i].push_back(total_shock);
-        if ((int)returns_history[i].size() > HISTORY_LEN)
+        if ((int)returns_history[i].size() > HISTORY_LEN) {
             returns_history[i].erase(returns_history[i].begin());
+        }
     }
-
-    update_ewma(realized_returns);
-    tick_count++;
 }
 
-struct LWResult {
-    vector<vector<double>> cov;
-    vector<vector<double>> corr;
-    double shrinkage_intensity;
-};
+double pearson(const vector<double>& a, const vector<double>& b) {
+    int n = min(a.size(), b.size());
+    if (n < 5) return 0.0;
 
-LWResult ledoit_wolf_shrink(const vector<vector<double>>& sample_cov, int T) {
-    int p = sample_cov.size();
-    LWResult result;
-    result.cov.assign(p, vector<double>(p, 0.0));
-    result.corr.assign(p, vector<double>(p, 0.0));
+    double ma = 0.0, mb = 0.0;
+    for (int k = 0; k < n; ++k) {
+        ma += a[k];
+        mb += b[k];
+    }
+    ma /= n;
+    mb /= n;
 
-    double mu = 0.0;
-    for (int i = 0; i < p; ++i) mu += sample_cov[i][i];
-    mu /= p;
+    double cov = 0.0, va = 0.0, vb = 0.0;
+    for (int k = 0; k < n; ++k) {
+        double da = a[k] - ma;
+        double db = b[k] - mb;
+        cov += da * db;
+        va += da * da;
+        vb += db * db;
+    }
 
-    double delta = 0.0;
-    for (int i = 0; i < p; ++i) {
-        for (int j = 0; j < p; ++j) {
-            double diff = sample_cov[i][j] - ((i == j) ? mu : 0.0);
-            delta += diff * diff;
+    if (va < 1e-12 || vb < 1e-12) return 0.0;
+    return cov / sqrt(va * vb);
+}
+
+vector<vector<double>> estimate_correlations_pearson() {
+    vector<vector<double>> est(NUM_STOCKS, vector<double>(NUM_STOCKS, 0.0));
+    for (int i = 0; i < NUM_STOCKS; ++i) {
+        est[i][i] = 1.0;
+        for (int j = i + 1; j < NUM_STOCKS; ++j) {
+            double r = pearson(returns_history[i], returns_history[j]);
+            est[i][j] = est[j][i] = r;
         }
     }
-    delta /= (double)(p * p);
+    return est;
+}
 
-    int n_eff = max(T, 2);
+double log_likelihood(const vector<vector<double>>& corr) {
+    // Simple pseudo-likelihood based on agreement between observed co-movement
+    // and candidate correlations.
+    double ll = 0.0;
+    for (int i = 0; i < NUM_STOCKS; ++i) {
+        for (int j = i + 1; j < NUM_STOCKS; ++j) {
+            double r = pearson(returns_history[i], returns_history[j]);
+            double diff = corr[i][j] - r;
+            ll -= diff * diff / 0.05;
+        }
+    }
+    return ll;
+}
 
-    double beta = 0.0;
-    if (!returns_history[0].empty()) {
-        int n = (int)returns_history[0].size();
-        vector<double> means(p, 0.0);
-        for (int i = 0; i < p; ++i) {
-            for (int t = 0; t < n; ++t) {
-                means[i] += returns_history[i][t];
-            }
-            means[i] /= n;
+vector<vector<double>> estimate_correlations_mcmc() {
+    vector<vector<double>> current = estimate_correlations_pearson();
+    double current_ll = log_likelihood(current);
+
+    vector<vector<double>> sum_corr(NUM_STOCKS, vector<double>(NUM_STOCKS, 0.0));
+    int samples = 0;
+
+    uniform_real_distribution<double> uni(0.0, 1.0);
+    normal_distribution<double> proposal(0.0, 0.05);
+
+    for (int iter = 0; iter < MCMC_ITERATIONS; ++iter) {
+        vector<vector<double>> proposed = current;
+
+        int i = (int)(uni(rng) * NUM_STOCKS);
+        int j = (int)(uni(rng) * NUM_STOCKS);
+        if (i == j) j = (j + 1) % NUM_STOCKS;
+        if (i > j) swap(i, j);
+
+        double nv = proposed[i][j] + proposal(rng);
+        nv = max(-0.99, min(0.99, nv));
+        proposed[i][j] = proposed[j][i] = nv;
+
+        double prop_ll = log_likelihood(proposed);
+        double log_alpha = prop_ll - current_ll;
+
+        if (log(uni(rng)) < log_alpha) {
+            current = proposed;
+            current_ll = prop_ll;
         }
 
-        double sum_sq = 0.0;
-        for (int t = 0; t < n; ++t) {
-            vector<double> z(p);
-            for (int i = 0; i < p; ++i) z[i] = returns_history[i][t] - means[i];
-
-            for (int i = 0; i < p; ++i) {
-                for (int j = 0; j < p; ++j) {
-                    double outer = z[i] * z[j];
-                    double diff = outer - sample_cov[i][j];
-                    sum_sq += diff * diff;
+        if (iter >= MCMC_BURNIN) {
+            for (int a = 0; a < NUM_STOCKS; ++a) {
+                for (int b = 0; b < NUM_STOCKS; ++b) {
+                    sum_corr[a][b] += current[a][b];
                 }
             }
-        }
-        beta = sum_sq / (n * n * p * p);
-    }
-
-    double intensity = (delta > 1e-15) ? min(beta / delta, 1.0) : 0.0;
-    intensity = max(0.0, intensity);
-    result.shrinkage_intensity = intensity;
-
-    for (int i = 0; i < p; ++i) {
-        for (int j = 0; j < p; ++j) {
-            double target_val = (i == j) ? mu : 0.0;
-            result.cov[i][j] = intensity * target_val + (1.0 - intensity) * sample_cov[i][j];
+            samples++;
         }
     }
 
-    for (int i = 0; i < p; ++i) {
-        result.corr[i][i] = 1.0;
-        double si = sqrt(max(result.cov[i][i], 1e-15));
-        for (int j = i + 1; j < p; ++j) {
-            double sj = sqrt(max(result.cov[j][j], 1e-15));
-            double r = result.cov[i][j] / (si * sj);
-            r = max(-1.0, min(1.0, r));
-            result.corr[i][j] = result.corr[j][i] = r;
+    if (samples > 0) {
+        for (int a = 0; a < NUM_STOCKS; ++a) {
+            for (int b = 0; b < NUM_STOCKS; ++b) {
+                sum_corr[a][b] /= samples;
+            }
         }
     }
 
-    return result;
-}
-
-LWResult estimate_correlations() {
-    return ledoit_wolf_shrink(ewma_cov, tick_count);
+    for (int i = 0; i < NUM_STOCKS; ++i) sum_corr[i][i] = 1.0;
+    return sum_corr;
 }
 
 double predicted_return(int i, const vector<vector<double>>& est) {
     if (returns_history[i].empty()) return 0.0;
+
     double weighted_sum = 0.0, weight_total = 0.0;
     for (int j = 0; j < NUM_STOCKS; ++j) {
         if (j == i || returns_history[j].empty()) continue;
@@ -205,22 +193,16 @@ double predicted_return(int i, const vector<vector<double>>& est) {
         weighted_sum += est[i][j] * last_return_j * w;
         weight_total += w;
     }
+
     if (weight_total < 1e-6) return 0.0;
     return weighted_sum / weight_total;
 }
 
 int main() {
-    cout << "Starting Market Simulator..." << endl;
     init_data();
-    
-    httplib::Server svr;
-    
-    cout << "Setting up static file serving..." << endl;
-    svr.set_mount_point("/", "./static");
 
-    svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content("OK", "text/plain");
-    });
+    httplib::Server svr;
+    svr.set_mount_point("/", "./static");
 
     svr.Get("/api/tick", [](const httplib::Request&, httplib::Response& res) {
         tick_simulation();
@@ -228,28 +210,30 @@ int main() {
     });
 
     svr.Get("/api/data", [](const httplib::Request&, httplib::Response& res) {
-        auto lw = estimate_correlations();
+        auto est = estimate_correlations_mcmc();
         stringstream ss;
         ss << "[";
         for (int i = 0; i < NUM_STOCKS; ++i) {
             if (i > 0) ss << ",";
-            double pred = predicted_return(i, lw.corr);
+            double pred = predicted_return(i, est);
             double signal = tanh(pred / BASE_A);
             string action = (signal >= 0) ? "BUY" : "SELL";
             double confidence = fabs(signal) * 100.0;
+
             ss << "{\"p\":" << prices[i]
                << ",\"action\":\"" << action << "\""
-               << ",\"confidence\":" << confidence
-               << ",\"shrinkage\":" << lw.shrinkage_intensity << "}";
+               << ",\"confidence\":" << confidence << "}";
         }
         ss << "]";
         res.set_content(ss.str(), "application/json");
     });
 
     svr.Get("/api/correlations", [](const httplib::Request&, httplib::Response& res) {
-        auto lw = estimate_correlations();
+        auto est = estimate_correlations_mcmc();
+
         double total_abs_error = 0.0;
         int pair_count = 0;
+
         stringstream ss;
         ss << "{\"error\":[";
         for (int i = 0; i < NUM_STOCKS; ++i) {
@@ -257,17 +241,18 @@ int main() {
             ss << "[";
             for (int j = 0; j < NUM_STOCKS; ++j) {
                 if (j > 0) ss << ",";
-                double err = lw.corr[i][j] - true_correlations[i][j];
+                double err = est[i][j] - true_correlations[i][j];
                 ss << err;
-                if (i != j) { total_abs_error += fabs(err); pair_count++; }
+                if (i != j) {
+                    total_abs_error += fabs(err);
+                    pair_count++;
+                }
             }
             ss << "]";
         }
         ss << "],";
         double mae = (pair_count > 0) ? total_abs_error / pair_count : 0.0;
         ss << "\"mae\":" << mae;
-        ss << ",\"shrinkage\":" << lw.shrinkage_intensity;
-        ss << ",\"tick\":" << tick_count;
         ss << "}";
         res.set_content(ss.str(), "application/json");
     });
@@ -279,21 +264,7 @@ int main() {
         res.set_content("OK", "text/plain");
     });
 
-    const char* port_env = getenv("PORT");
-    int port = port_env ? stoi(port_env) : 8080;
-    
-    cout << "Server starting on 0.0.0.0:" << port << endl;
-    cout << "Endpoints available:" << endl;
-    cout << "  GET  /health" << endl;
-    cout << "  GET  /api/tick" << endl;
-    cout << "  GET  /api/data" << endl;
-    cout << "  GET  /api/correlations" << endl;
-    cout << "  POST /api/action" << endl;
-    
-    if (!svr.listen("0.0.0.0", port)) {
-        cerr << "Failed to start server on port " << port << endl;
-        return 1;
-    }
-    
-    return 0;
+    int port = getenv("PORT") ? stoi(getenv("PORT")) : 8080;
+    cout << "Server starting on port " << port << endl;
+    svr.listen("0.0.0.0", port);
 }
